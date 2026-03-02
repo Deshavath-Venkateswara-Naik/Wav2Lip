@@ -86,11 +86,31 @@ def face_detect(images):
 
 	results = []
 	pady1, pady2, padx1, padx2 = args.pads
-	for rect, image in zip(predictions, images):
-		if rect is None:
-			cv2.imwrite('temp/faulty_frame.jpg', image) # check this frame where the face was not detected.
-			raise ValueError('Face not detected! Ensure the video contains a face in all the frames.')
+	# Fallback logic for missing detections
+	last_rect = None
+	for i in range(len(predictions)):
+		if predictions[i] is None:
+			if last_rect is not None:
+				predictions[i] = last_rect
+				print(f"Warning: Face not detected in frame {i}. Using last valid detection.")
+			else:
+				# Look forward for the first valid detection
+				found = False
+				for j in range(i + 1, len(predictions)):
+					if predictions[j] is not None:
+						predictions[i] = predictions[j]
+						last_rect = predictions[j]
+						print(f"Warning: Face not detected in frame {i}. Using first valid detection from frame {j}.")
+						found = True
+						break
+				if not found:
+					# This image has no face at all and no neighbors have one (unlikely in a video unless completely black/empty)
+					cv2.imwrite('temp/faulty_frame.jpg', images[i])
+					raise ValueError(f'Face not detected in frame {i} and no neighbors found! Ensure the video contains a face.')
+		else:
+			last_rect = predictions[i]
 
+	for rect, image in zip(predictions, images):
 		y1 = max(0, rect[1] - pady1)
 		y2 = min(image.shape[0], rect[3] + pady2)
 		x1 = max(0, rect[0] - padx1)
@@ -158,18 +178,17 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print('Using {} for inference.'.format(device))
 
 def _load(checkpoint_path):
-	if device == 'cuda':
-		checkpoint = torch.load(checkpoint_path)
-	else:
-		checkpoint = torch.load(checkpoint_path,
-								map_location=lambda storage, loc: storage)
+	checkpoint = torch.load(checkpoint_path, map_location=device)
 	return checkpoint
 
 def load_model(path):
 	model = Wav2Lip()
 	print("Load checkpoint from: {}".format(path))
 	checkpoint = _load(path)
-	s = checkpoint["state_dict"]
+	if isinstance(checkpoint, dict):
+		s = checkpoint["state_dict"]
+	else:
+		s = checkpoint.state_dict()
 	new_s = {}
 	for k, v in s.items():
 		new_s[k.replace('module.', '')] = v
@@ -202,7 +221,7 @@ def main():
 				frame = cv2.resize(frame, (frame.shape[1]//args.resize_factor, frame.shape[0]//args.resize_factor))
 
 			if args.rotate:
-				frame = cv2.rotate(frame, cv2.cv2.ROTATE_90_CLOCKWISE)
+				frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
 			y1, y2, x1, x2 = args.crop
 			if x2 == -1: x2 = frame.shape[1]
